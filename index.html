@@ -4,43 +4,47 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Underground</title>
+
   <link rel="stylesheet" href="style.css">
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 
-  <header>
-    <h1>Underground</h1>
-    <p>Anonymous School Network</p>
-  </header>
+<header>
+  <h1>Underground</h1>
+  <p>Anonymous School Network</p>
+</header>
 
-  <div class="container">
+<div class="container">
 
-    <div class="top-bar">
-      <select id="schoolSelect">
-        <option value="Buford High">Buford High</option>
-        <option value="North Gwinnett">North Gwinnett</option>
-        <option value="Mill Creek">Mill Creek</option>
-      </select>
+  <div class="controls">
 
-      <button onclick="clearFeed()">Reset Feed</button>
-    </div>
+    <select id="school">
+      <option>Buford High</option>
+      <option>Mill Creek</option>
+      <option>North Gwinnett</option>
+    </select>
 
-    <div class="post-box">
-      <textarea id="postInput" placeholder="Post anonymously..."></textarea>
-
-      <select id="postType">
-        <option value="post">Post</option>
-        <option value="confession">Confession</option>
-        <option value="poll">Poll</option>
-      </select>
-
-      <button onclick="createPost()">Send</button>
-    </div>
-
-    <div id="feed"></div>
+    <select id="type">
+      <option value="post">Post</option>
+      <option value="confession">Confession</option>
+      <option value="poll">Poll</option>
+      <option value="question">Question</option>
+    </select>
 
   </div>
 
-  <script src="app.js"></script>
+  <textarea id="input" placeholder="Say something..."></textarea>
+
+  <button id="send">Post</button>
+
+  <div id="feed"></div>
+
+</div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+
 </body>
 </html>
