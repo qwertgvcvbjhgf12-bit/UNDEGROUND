@@ -93,15 +93,16 @@ function badWords(text) {
 }
 
 supabaseClient
-  .channel("posts-live")
+  .channel("posts-channel")
   .on(
     "postgres_changes",
     {
-      event: "*",
+      event: "*",   // IMPORTANT (not just INSERT)
       schema: "public",
       table: "posts"
     },
-    () => {
+    (payload) => {
+      console.log("CHANGE:", payload);
       loadPosts();
     }
   )
