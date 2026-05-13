@@ -6,7 +6,7 @@ let renderPending = false;
 let realtimeCooldown = false;
 
 // ------------------------------
-// SAFE REQUEST WRAPPER
+// SAFE WRAPPER
 // ------------------------------
 async function safeRequest(fn) {
   try {
@@ -20,13 +20,13 @@ async function safeRequest(fn) {
 // ------------------------------
 // HOT SCORE
 // ------------------------------
-function getHotScore(post) {
+function getHotScore(p) {
   const ageHours =
-    (Date.now() - new Date(post.created_at || Date.now()).getTime()) /
+    (Date.now() - new Date(p.created_at || Date.now()).getTime()) /
     36e5;
 
-  const votes = post.votes || 0;
-  const comments = post.comments_count || 0;
+  const votes = p.votes || 0;
+  const comments = p.comments_count || 0;
 
   return (votes * 2 + comments * 3) / Math.pow(ageHours + 2, 1.5);
 }
@@ -39,7 +39,7 @@ function getSchool() {
 }
 
 // ------------------------------
-// LOAD POSTS (SCHOOL LOCKED)
+// LOAD POSTS
 // ------------------------------
 async function loadPosts() {
   const school = getSchool();
@@ -54,16 +54,13 @@ async function loadPosts() {
   if (error || !data) return;
 
   postsCache.clear();
-
-  data.forEach(p => {
-    if (p?.id) postsCache.set(p.id, p);
-  });
+  data.forEach(p => postsCache.set(p.id, p));
 
   render();
 }
 
 // ------------------------------
-// RENDER (STABLE)
+// RENDER
 // ------------------------------
 function render() {
   if (renderPending) return;
@@ -71,31 +68,30 @@ function render() {
   renderPending = true;
 
   requestAnimationFrame(() => {
-    const posts = [...postsCache.values()];
-
-    posts.sort((a, b) => getHotScore(b) - getHotScore(a));
+    const posts = [...postsCache.values()]
+      .sort((a, b) => getHotScore(b) - getHotScore(a));
 
     feed.innerHTML = "";
 
-    posts.forEach(post => {
+    posts.forEach(p => {
       const div = document.createElement("div");
       div.className = "post";
-      div.setAttribute("data-id", post.id);
+      div.setAttribute("data-id", p.id);
 
       div.innerHTML = `
         <div class="meta">
-          🏫 ${post.school} • 🔥 ${getHotScore(post).toFixed(2)}
+          🏫 ${p.school} • 🔥 ${getHotScore(p).toFixed(2)}
         </div>
 
-        <div>${post.text}</div>
+        <div>${p.text}</div>
 
         <div class="actions">
-          ⭐ <span class="vote-count">${post.votes || 0}</span>
-          💬 ${post.comments_count || 0}
+          ⭐ <span class="vote-count">${p.votes || 0}</span>
+          💬 ${p.comments_count || 0}
 
-          <button onclick="vote(${post.id}, 1)">▲</button>
-          <button onclick="vote(${post.id}, -1)">▼</button>
-          <button onclick="openComments(${post.id})">💬</button>
+          <button onclick="vote(${p.id}, 1)">▲</button>
+          <button onclick="vote(${p.id}, -1)">▼</button>
+          <button onclick="openComments(${p.id})">💬</button>
         </div>
       `;
 
@@ -107,7 +103,7 @@ function render() {
 }
 
 // ------------------------------
-// POST (INSTANT UI)
+// POST (INSTANT)
 // ------------------------------
 document.getElementById("send").addEventListener("click", async () => {
   const text = document.getElementById("input").value;
@@ -119,7 +115,7 @@ document.getElementById("send").addEventListener("click", async () => {
 
   const tempId = Date.now();
 
-  const newPost = {
+  const tempPost = {
     id: tempId,
     text,
     school,
@@ -129,7 +125,7 @@ document.getElementById("send").addEventListener("click", async () => {
     created_at: new Date().toISOString()
   };
 
-  postsCache.set(tempId, newPost);
+  postsCache.set(tempId, tempPost);
   render();
 
   document.getElementById("input").value = "";
@@ -158,24 +154,24 @@ document.getElementById("send").addEventListener("click", async () => {
 });
 
 // ------------------------------
-// VOTE (ANTI-SPAM + INSTANT)
+// VOTE (SAFE)
 // ------------------------------
 async function vote(id, amount) {
   if (voteLock.has(id)) return;
   voteLock.add(id);
 
-  const post = postsCache.get(id);
-  if (!post) return;
+  const p = postsCache.get(id);
+  if (!p) return;
 
-  post.votes = (post.votes || 0) + amount;
-  postsCache.set(id, post);
+  p.votes = (p.votes || 0) + amount;
+  postsCache.set(id, p);
 
   render();
 
   await safeRequest(() =>
     supabaseClient
       .from("posts")
-      .update({ votes: post.votes })
+      .update({ votes: p.votes })
       .eq("id", id)
   );
 
@@ -183,17 +179,17 @@ async function vote(id, amount) {
 }
 
 // ------------------------------
-// COMMENTS
+// COMMENTS (FIXED - NO DUPLICATE DECLARE BUG)
 // ------------------------------
 async function openComments(postId) {
-  const comment = prompt("Write comment:");
-  if (!comment) return;
+  const text = prompt("Write comment:");
+  if (!text) return;
 
-  const post = postsCache.get(postId);
-  if (!post) return;
+  const p = postsCache.get(postId);
+  if (!p) return;
 
-  post.comments_count = (post.comments_count || 0) + 1;
-  postsCache.set(postId, post);
+  p.comments_count = (p.comments_count || 0) + 1;
+  postsCache.set(postId, p);
 
   render();
 
@@ -201,8 +197,8 @@ async function openComments(postId) {
     supabaseClient.from("comments").insert([
       {
         post_id: postId,
-        text: comment,
-        school: post.school
+        text: text,
+        school: p.school
       }
     ])
   );
@@ -210,7 +206,7 @@ async function openComments(postId) {
   await safeRequest(() =>
     supabaseClient
       .from("posts")
-      .update({ comments_count: post.comments_count })
+      .update({ comments_count: p.comments_count })
       .eq("id", postId)
   );
 }
@@ -225,7 +221,7 @@ function badWords(text) {
 }
 
 // ------------------------------
-// REALTIME (CONTROLLED)
+// REALTIME (SAFE)
 // ------------------------------
 supabaseClient
   .channel("posts-channel")
@@ -251,7 +247,7 @@ supabaseClient
 loadPosts();
 
 // ------------------------------
-// SCHOOL SWITCH REFRESH
+// SCHOOL CHANGE
 // ------------------------------
 document.getElementById("school")
   .addEventListener("change", loadPosts);
