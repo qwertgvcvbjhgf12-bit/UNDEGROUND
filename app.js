@@ -1,23 +1,24 @@
 // ============================================================
 // UNDERGROUND — Anonymous Teen Social Network
-// Fixed: per-school realtime subscriptions, channel cleanup,
-//        optimistic UI, bad-word guard, and hot-score ranking.
+// Fixed: hard reset on school change, channel killed before
+//        cache clear, no cross-school bleed possible.
 // ============================================================
 
-// ── CONFIG ──────────────────────────────────────────────────
-// Replace these with your actual Supabase project values.
+// ── CONFIG ───────────────────────────────────────────────────
+// Uncomment and fill in your Supabase project values:
 // const supabaseClient = supabase.createClient(
 //   "https://YOUR_PROJECT.supabase.co",
 //   "YOUR_ANON_KEY"
 // );
 
-// ── STATE ────────────────────────────────────────────────────
-const feed      = document.getElementById("feed");
-let postsCache  = new Map();          // id → post object
-const voteLock  = new Set();          // ids currently being voted on
-let activeChannel = null;             // current Realtime channel
+// ── STATE ─────────────────────────────────────────────────────
+const feed        = document.getElementById("feed");
+let postsCache    = new Map();   // id → post object
+const voteLock    = new Set();   // ids currently being voted on
+let activeChannel = null;        // current Realtime channel
+let currentSchool = "";          // tracks which school is loaded
 
-// ── HELPERS ──────────────────────────────────────────────────
+// ── HELPERS ───────────────────────────────────────────────────
 
 /** Wraps a Supabase call and swallows errors, returning null on failure. */
 function safeRequest(fn) {
@@ -45,12 +46,21 @@ function getHotScore(p) {
 }
 
 /**
- * Basic profanity / danger-word check.
+ * Basic danger-word check.
  * Extend the list as needed.
  */
 function containsBadWords(text) {
   const banned = ["bomb", "kill", "shoot school", "shoot up"];
   return banned.some(w => text.toLowerCase().includes(w));
+}
+
+/** Minimal XSS protection — escapes HTML special chars. */
+function escapeHTML(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 // ── RENDER ────────────────────────────────────────────────────
@@ -73,14 +83,13 @@ function render() {
     el.className = "post";
     el.setAttribute("data-id", item.id);
 
-    // Badge colour per post type
     const typeBadge = item.type
       ? `<span class="badge badge--${item.type}">${item.type}</span>`
       : "";
 
     el.innerHTML = `
       <div class="post__header">
-        <span class="post__school">🏫 ${item.school}</span>
+        <span class="post__school">🏫 ${escapeHTML(item.school)}</span>
         ${typeBadge}
       </div>
       <p class="post__text">${escapeHTML(item.text)}</p>
@@ -96,21 +105,88 @@ function render() {
   });
 }
 
-/** Minimal XSS protection — escapes HTML special chars. */
-function escapeHTML(str) {
-  return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+// ── HARD RESET ────────────────────────────────────────────────
+
+/**
+ * Completely tears down the current school session:
+ *  1. Awaits channel removal so no stale events can fire
+ *  2. Clears the cache
+ *  3. Wipes the DOM immediately
+ * Must be called and awaited before loading a new school.
+ */
+async function hardReset() {
+  // Step 1 — kill the channel FIRST, await it so no in-flight
+  // realtime event can sneak through during the switch
+  if (activeChannel) {
+    await supabaseClient.removeChannel(activeChannel);
+    activeChannel = null;
+  }
+
+  // Step 2 — nuke the cache so no old data can bleed into render
+  postsCache.clear();
+  currentSchool = "";
+
+  // Step 3 — wipe the DOM immediately, user sees nothing from old school
+  feed.innerHTML = `<p class="empty">Switching schools... 🔄</p>`;
+}
+
+// ── REALTIME ──────────────────────────────────────────────────
+
+/**
+ * Subscribes to realtime changes for ONE specific school.
+ * Server-side filter means only posts for this school are pushed.
+ *
+ * Requires in Supabase dashboard:
+ *   Database → Replication → posts → enable Realtime + filter pushdown
+ */
+function subscribeToSchool(school) {
+  activeChannel = supabaseClient
+    .channel(`posts:school=eq.${school}`)
+    .on(
+      "postgres_changes",
+      {
+        event:  "*",
+        schema: "public",
+        table:  "posts",
+        filter: `school=eq.${school}`
+      },
+      payload => {
+        // Guard: if school changed while an event was in-flight, discard it
+        if (currentSchool !== school) return;
+
+        switch (payload.eventType) {
+          case "INSERT":
+            if (!postsCache.has(payload.new.id)) {
+              postsCache.set(payload.new.id, payload.new);
+            }
+            break;
+          case "UPDATE":
+            postsCache.set(payload.new.id, payload.new);
+            break;
+          case "DELETE":
+            postsCache.delete(payload.old.id);
+            break;
+        }
+        render();
+      }
+    )
+    .subscribe(status => {
+      console.log(`[Underground] Realtime status for "${school}": ${status}`);
+    });
 }
 
 // ── DATA LOADING ──────────────────────────────────────────────
 
-/** Fetches all posts for the selected school and re-renders. */
+/** Loads posts for the selected school then subscribes to realtime. */
 async function loadPosts() {
   const school = getSchool();
-  if (!school) return;
+
+  if (!school) {
+    feed.innerHTML = `<p class="empty">Select a school to see posts. 🏫</p>`;
+    return;
+  }
+
+  feed.innerHTML = `<p class="empty">Loading posts... ⏳</p>`;
 
   const result = await safeRequest(() =>
     supabaseClient
@@ -120,71 +196,29 @@ async function loadPosts() {
       .order("created_at", { ascending: false })
   );
 
-  if (!result?.data) return;
+  // If the school changed while we were fetching, abort —
+  // don't render data for a school the user already left
+  if (getSchool() !== school) return;
 
-  postsCache = new Map(result.data.map(x => [x.id, x]));
+  if (!result?.data) {
+    feed.innerHTML = `<p class="empty">Failed to load posts. Try again. 😔</p>`;
+    return;
+  }
+
+  currentSchool = school;
+  postsCache    = new Map(result.data.map(x => [x.id, x]));
   render();
 
-  // Re-subscribe scoped to this school
+  // Subscribe only after fresh data is confirmed in place
   subscribeToSchool(school);
 }
 
-// ── REALTIME (THE BIG FIX) ────────────────────────────────────
+// ── SCHOOL CHANGE ─────────────────────────────────────────────
 
-/**
- * Creates a Supabase Realtime channel filtered to ONE school.
- * Removes the previous channel first so we never listen to
- * multiple schools simultaneously.
- *
- * IMPORTANT: For the server-side filter to work you must enable
- * "Filter pushdown" for the posts table in your Supabase dashboard:
- *   Database → Replication → posts → enable realtime + row filter support
- */
-function subscribeToSchool(school) {
-  // ── tear down the old channel ──
-  if (activeChannel) {
-    supabaseClient.removeChannel(activeChannel);
-    activeChannel = null;
-  }
-
-  // ── create a new channel scoped to this school ──
-  activeChannel = supabaseClient
-    .channel(`posts:school=eq.${school}`)          // unique name per school
-    .on(
-      "postgres_changes",
-      {
-        event:  "*",
-        schema: "public",
-        table:  "posts",
-        filter: `school=eq.${school}`              // ← server-side filter (KEY FIX)
-      },
-      payload => {
-        // Handle each CDC event individually — no full reload needed
-        switch (payload.eventType) {
-          case "INSERT":
-            // Don't overwrite an optimistic post that already exists
-            if (!postsCache.has(payload.new.id)) {
-              postsCache.set(payload.new.id, payload.new);
-            }
-            break;
-
-          case "UPDATE":
-            postsCache.set(payload.new.id, payload.new);
-            break;
-
-          case "DELETE":
-            postsCache.delete(payload.old.id);
-            break;
-        }
-        render();
-      }
-    )
-    .subscribe(status => {
-      if (status === "SUBSCRIBED") {
-        console.log(`[Underground] Subscribed to school: ${school}`);
-      }
-    });
-}
+document.getElementById("school").addEventListener("change", async () => {
+  await hardReset();  // channel killed + cache nuked + DOM wiped
+  await loadPosts();  // fresh fetch + new scoped subscription
+});
 
 // ── POSTING ───────────────────────────────────────────────────
 
@@ -197,14 +231,13 @@ document.getElementById("send").addEventListener("click", async () => {
   if (!text)   return;
   if (!school) { alert("Please select a school first."); return; }
 
-  // Content moderation check
   if (containsBadWords(text)) {
     alert("⚠️ Your post was flagged and cannot be submitted.");
     return;
   }
 
-  // ── Optimistic insert ──
-  const tempId = `temp_${Date.now()}`;
+  // Optimistic insert — show post immediately before DB confirms
+  const tempId   = `temp_${Date.now()}`;
   const tempPost = {
     id:             tempId,
     text,
@@ -213,13 +246,12 @@ document.getElementById("send").addEventListener("click", async () => {
     votes:          0,
     comments_count: 0,
     created_at:     new Date().toISOString(),
-    _optimistic:    true
   };
   postsCache.set(tempId, tempPost);
   render();
   input.value = "";
 
-  // ── Persist to Supabase ──
+  // Persist to Supabase
   const result = await safeRequest(() =>
     supabaseClient
       .from("posts")
@@ -228,7 +260,7 @@ document.getElementById("send").addEventListener("click", async () => {
       .single()
   );
 
-  // Replace temp entry with real one (or remove on failure)
+  // Swap temp entry for real one, or remove it on failure
   postsCache.delete(tempId);
   if (result?.data) {
     postsCache.set(result.data.id, result.data);
@@ -240,10 +272,6 @@ document.getElementById("send").addEventListener("click", async () => {
 
 // ── VOTING ────────────────────────────────────────────────────
 
-/**
- * Optimistic vote: updates locally immediately, then persists.
- * voteLock prevents double-clicking from sending duplicate requests.
- */
 async function vote(id, amount) {
   if (voteLock.has(id)) return;
   voteLock.add(id);
@@ -273,14 +301,6 @@ async function vote(id, amount) {
 
   voteLock.delete(id);
 }
-
-// ── SCHOOL CHANGE ─────────────────────────────────────────────
-
-document.getElementById("school").addEventListener("change", () => {
-  postsCache.clear();   // clear previous school's posts immediately
-  render();
-  loadPosts();          // loadPosts → subscribeToSchool handles channel swap
-});
 
 // ── BOOT ──────────────────────────────────────────────────────
 loadPosts();
