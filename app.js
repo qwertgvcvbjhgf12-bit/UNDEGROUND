@@ -106,5 +106,3 @@ supabaseClient
     }
   )
   .subscribe();
-
-loadPosts();
