@@ -13,20 +13,26 @@ function getHotScore(post) {
   const votes = post.votes || 0;
   const comments = post.comments_count || 0;
 
-  // Reddit-style ranking formula (simplified)
-  const score =
-    (votes * 2 + comments * 3) / Math.pow(ageHours + 2, 1.5);
-
-  return score;
+  return (votes * 2 + comments * 3) / Math.pow(ageHours + 2, 1.5);
 }
 
 // ------------------------------
-// LOAD POSTS
+// GET CURRENT SCHOOL
+// ------------------------------
+function getSchool() {
+  return document.getElementById("school").value;
+}
+
+// ------------------------------
+// LOAD POSTS (FILTERED BY SCHOOL)
 // ------------------------------
 async function loadPosts() {
+  const school = getSchool();
+
   const { data, error } = await supabaseClient
     .from("posts")
-    .select("*");
+    .select("*")
+    .eq("school", school);   // 🔥 THIS FIXES CROSS-SCHOOL LEAK
 
   if (error) return console.error(error);
 
@@ -37,7 +43,7 @@ async function loadPosts() {
 }
 
 // ------------------------------
-// RENDER (SORTED BY HOT SCORE)
+// RENDER
 // ------------------------------
 function render() {
   const posts = [...postsCache.values()];
@@ -77,7 +83,7 @@ function render() {
 // ------------------------------
 document.getElementById("send").addEventListener("click", async () => {
   const text = document.getElementById("input").value;
-  const school = document.getElementById("school").value;
+  const school = getSchool();
   const type = document.getElementById("type").value;
 
   if (!text.trim()) return;
@@ -115,7 +121,7 @@ document.getElementById("send").addEventListener("click", async () => {
 });
 
 // ------------------------------
-// VOTING (INSTANT)
+// VOTING (INSTANT UI)
 // ------------------------------
 async function vote(id, amount) {
   const post = postsCache.get(id);
@@ -133,28 +139,27 @@ async function vote(id, amount) {
 }
 
 // ------------------------------
-// COMMENTS (SIMPLE VERSION)
+// COMMENTS
 // ------------------------------
 async function openComments(postId) {
   const comment = prompt("Write comment:");
-
   if (!comment) return;
 
   const post = postsCache.get(postId);
-  post.comments_count = (post.comments_count || 0) + 1;
+  if (!post) return;
 
+  post.comments_count = (post.comments_count || 0) + 1;
   postsCache.set(postId, post);
+
   render();
 
-  const post = postsCache.get(postId);
-
-await supabaseClient.from("comments").insert([
-  {
-    post_id: postId,
-    text: comment,
-    school: post.school
-  }
-]);
+  await supabaseClient.from("comments").insert([
+    {
+      post_id: postId,
+      text: comment,
+      school: post.school   // 🔥 KEEP SCHOOL ISOLATION
+    }
+  ]);
 
   await supabaseClient
     .from("posts")
@@ -172,16 +177,26 @@ function badWords(text) {
 }
 
 // ------------------------------
-// REALTIME SYNC
+// REALTIME SYNC (SCHOOL-LOCKED)
 // ------------------------------
 supabaseClient
   .channel("posts-channel")
   .on(
     "postgres_changes",
     { event: "*", schema: "public", table: "posts" },
-    () => loadPosts()
+    (payload) => {
+      // reload only current school data
+      loadPosts();
+    }
   )
   .subscribe();
 
 // ------------------------------
 loadPosts();
+
+// ------------------------------
+// UPDATE FEED WHEN SCHOOL CHANGES
+// ------------------------------
+document.getElementById("school").addEventListener("change", () => {
+  loadPosts();
+});
