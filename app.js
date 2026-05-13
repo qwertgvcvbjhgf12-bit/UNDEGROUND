@@ -1,32 +1,49 @@
 const feed = document.getElementById("feed");
 
-// local cache (prevents full reload every time)
 let postsCache = new Map();
 
-/* -----------------------------
-   LOAD POSTS (initial + sync)
-------------------------------*/
+// ------------------------------
+// HOT SCORE ALGORITHM
+// ------------------------------
+function getHotScore(post) {
+  const ageHours =
+    (Date.now() - new Date(post.created_at || Date.now()).getTime()) /
+    36e5;
+
+  const votes = post.votes || 0;
+  const comments = post.comments_count || 0;
+
+  // Reddit-style ranking formula (simplified)
+  const score =
+    (votes * 2 + comments * 3) / Math.pow(ageHours + 2, 1.5);
+
+  return score;
+}
+
+// ------------------------------
+// LOAD POSTS
+// ------------------------------
 async function loadPosts() {
   const { data, error } = await supabaseClient
     .from("posts")
-    .select("*")
-    .order("votes", { ascending: false });
+    .select("*");
 
-  if (error) {
-    console.error(error);
-    return;
-  }
+  if (error) return console.error(error);
 
   postsCache.clear();
   data.forEach(p => postsCache.set(p.id, p));
 
-  render([...postsCache.values()]);
+  render();
 }
 
-/* -----------------------------
-   RENDER UI
-------------------------------*/
-function render(posts) {
+// ------------------------------
+// RENDER (SORTED BY HOT SCORE)
+// ------------------------------
+function render() {
+  const posts = [...postsCache.values()];
+
+  posts.sort((a, b) => getHotScore(b) - getHotScore(a));
+
   feed.innerHTML = "";
 
   posts.forEach(post => {
@@ -36,15 +53,18 @@ function render(posts) {
 
     div.innerHTML = `
       <div class="meta">
-        #${post.type} • ${post.school}
+        🏫 ${post.school} • 🔥 ${getHotScore(post).toFixed(2)}
       </div>
 
       <div>${post.text}</div>
 
       <div class="actions">
         ⭐ <span class="vote-count">${post.votes}</span>
+        💬 ${post.comments_count || 0}
+
         <button onclick="vote(${post.id}, 1)">▲</button>
         <button onclick="vote(${post.id}, -1)">▼</button>
+        <button onclick="openComments(${post.id})">💬</button>
       </div>
     `;
 
@@ -52,118 +72,113 @@ function render(posts) {
   });
 }
 
-/* -----------------------------
-   POST (OPTIMISTIC UI)
-------------------------------*/
-document.getElementById("send")
-  .addEventListener("click", async () => {
+// ------------------------------
+// POST (INSTANT UI)
+// ------------------------------
+document.getElementById("send").addEventListener("click", async () => {
+  const text = document.getElementById("input").value;
+  const school = document.getElementById("school").value;
+  const type = document.getElementById("type").value;
 
-    const text = document.getElementById("input").value;
-    const school = document.getElementById("school").value;
-    const type = document.getElementById("type").value;
+  if (!text.trim()) return;
+  if (badWords(text)) return alert("Blocked");
 
-    if (!text.trim()) return;
+  const tempId = Date.now();
 
-    if (badWords(text)) {
-      alert("Blocked by moderation");
-      return;
-    }
+  const newPost = {
+    id: tempId,
+    text,
+    school,
+    type,
+    votes: 0,
+    comments_count: 0,
+    created_at: new Date().toISOString()
+  };
 
-    // 🔥 1. create optimistic post instantly
-    const tempId = Date.now();
+  postsCache.set(tempId, newPost);
+  render();
 
-    const newPost = {
-      id: tempId,
-      text,
-      school,
-      type,
-      votes: 0
-    };
+  document.getElementById("input").value = "";
 
-    postsCache.set(tempId, newPost);
-    render([...postsCache.values()]);
+  const { data, error } = await supabaseClient
+    .from("posts")
+    .insert([newPost])
+    .select()
+    .single();
 
-    document.getElementById("input").value = "";
+  if (error) return console.error(error);
 
-    // 🔥 2. send to Supabase
-    const { data, error } = await supabaseClient
-      .from("posts")
-      .insert([{
-        text,
-        school,
-        type,
-        votes: 0
-      }])
-      .select()
-      .single();
+  postsCache.delete(tempId);
+  postsCache.set(data.id, data);
 
-    if (error) {
-      console.error(error);
-      return;
-    }
+  render();
+});
 
-    // 🔥 3. replace temp post with real one
-    postsCache.delete(tempId);
-    postsCache.set(data.id, data);
-
-    render([...postsCache.values()]);
-  });
-
-/* -----------------------------
-   VOTING (INSTANT UI UPDATE)
-------------------------------*/
+// ------------------------------
+// VOTING (INSTANT)
+// ------------------------------
 async function vote(id, amount) {
-
   const post = postsCache.get(id);
   if (!post) return;
 
-  // 🔥 INSTANT UI UPDATE (NO LAG)
   post.votes += amount;
   postsCache.set(id, post);
-  render([...postsCache.values()]);
 
-  // 🔥 BACKGROUND SYNC
-  const { error } = await supabaseClient
+  render();
+
+  await supabaseClient
     .from("posts")
     .update({ votes: post.votes })
     .eq("id", id);
-
-  if (error) console.error(error);
 }
 
-/* -----------------------------
-   BAD WORD FILTER
-------------------------------*/
-function badWords(text) {
-  const blocked = ["bomb", "kill", "shoot school"];
+// ------------------------------
+// COMMENTS (SIMPLE VERSION)
+// ------------------------------
+async function openComments(postId) {
+  const comment = prompt("Write comment:");
 
-  return blocked.some(word =>
-    text.toLowerCase().includes(word)
+  if (!comment) return;
+
+  const post = postsCache.get(postId);
+  post.comments_count = (post.comments_count || 0) + 1;
+
+  postsCache.set(postId, post);
+  render();
+
+  await supabaseClient.from("comments").insert([
+    {
+      post_id: postId,
+      text: comment
+    }
+  ]);
+
+  await supabaseClient
+    .from("posts")
+    .update({ comments_count: post.comments_count })
+    .eq("id", postId);
+}
+
+// ------------------------------
+// BAD WORD FILTER
+// ------------------------------
+function badWords(text) {
+  return ["bomb", "kill", "shoot school"].some(w =>
+    text.toLowerCase().includes(w)
   );
 }
 
-/* -----------------------------
-   REALTIME SYNC (OTHERS ONLY)
-------------------------------*/
+// ------------------------------
+// REALTIME SYNC
+// ------------------------------
 supabaseClient
   .channel("posts-channel")
   .on(
     "postgres_changes",
-    {
-      event: "*",
-      schema: "public",
-      table: "posts"
-    },
-    (payload) => {
-      console.log("SYNC:", payload);
-
-      // only refresh cache from DB changes
-      loadPosts();
-    }
+    { event: "*", schema: "public", table: "posts" },
+    () => loadPosts()
   )
   .subscribe();
 
-/* -----------------------------
-   INIT
-------------------------------*/
+// ------------------------------
 loadPosts();
