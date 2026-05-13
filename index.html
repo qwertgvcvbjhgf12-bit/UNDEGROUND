@@ -1,1 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Underground</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
 
+  <header>
+    <h1>Underground</h1>
+    <p>Anonymous School Network</p>
+  </header>
+
+  <div class="container">
+
+    <div class="top-bar">
+      <select id="schoolSelect">
+        <option value="Buford High">Buford High</option>
+        <option value="North Gwinnett">North Gwinnett</option>
+        <option value="Mill Creek">Mill Creek</option>
+      </select>
+
+      <button onclick="clearFeed()">Reset Feed</button>
+    </div>
+
+    <div class="post-box">
+      <textarea id="postInput" placeholder="Post anonymously..."></textarea>
+
+      <select id="postType">
+        <option value="post">Post</option>
+        <option value="confession">Confession</option>
+        <option value="poll">Poll</option>
+      </select>
+
+      <button onclick="createPost()">Send</button>
+    </div>
+
+    <div id="feed"></div>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
