@@ -146,12 +146,15 @@ async function openComments(postId) {
   postsCache.set(postId, post);
   render();
 
-  await supabaseClient.from("comments").insert([
-    {
-      post_id: postId,
-      text: comment
-    }
-  ]);
+  const post = postsCache.get(postId);
+
+await supabaseClient.from("comments").insert([
+  {
+    post_id: postId,
+    text: comment,
+    school: post.school
+  }
+]);
 
   await supabaseClient
     .from("posts")
