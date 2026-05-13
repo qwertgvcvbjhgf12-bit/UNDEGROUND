@@ -1,23 +1,38 @@
 const feed = document.getElementById("feed");
 
-async function loadPosts() {
+// local cache (prevents full reload every time)
+let postsCache = new Map();
 
-  const { data } = await supabaseClient
+/* -----------------------------
+   LOAD POSTS (initial + sync)
+------------------------------*/
+async function loadPosts() {
+  const { data, error } = await supabaseClient
     .from("posts")
     .select("*")
     .order("votes", { ascending: false });
 
-  render(data);
+  if (error) {
+    console.error(error);
+    return;
+  }
+
+  postsCache.clear();
+  data.forEach(p => postsCache.set(p.id, p));
+
+  render([...postsCache.values()]);
 }
 
+/* -----------------------------
+   RENDER UI
+------------------------------*/
 function render(posts) {
-
   feed.innerHTML = "";
 
   posts.forEach(post => {
-
     const div = document.createElement("div");
     div.className = "post";
+    div.setAttribute("data-id", post.id);
 
     div.innerHTML = `
       <div class="meta">
@@ -27,8 +42,7 @@ function render(posts) {
       <div>${post.text}</div>
 
       <div class="actions">
-        ⭐ ${post.votes}
-
+        ⭐ <span class="vote-count">${post.votes}</span>
         <button onclick="vote(${post.id}, 1)">▲</button>
         <button onclick="vote(${post.id}, -1)">▼</button>
       </div>
@@ -38,6 +52,9 @@ function render(posts) {
   });
 }
 
+/* -----------------------------
+   POST (OPTIMISTIC UI)
+------------------------------*/
 document.getElementById("send")
   .addEventListener("click", async () => {
 
@@ -52,58 +69,101 @@ document.getElementById("send")
       return;
     }
 
-    await supabaseClient
+    // 🔥 1. create optimistic post instantly
+    const tempId = Date.now();
+
+    const newPost = {
+      id: tempId,
+      text,
+      school,
+      type,
+      votes: 0
+    };
+
+    postsCache.set(tempId, newPost);
+    render([...postsCache.values()]);
+
+    document.getElementById("input").value = "";
+
+    // 🔥 2. send to Supabase
+    const { data, error } = await supabaseClient
       .from("posts")
       .insert([{
         text,
         school,
-        type
-      }]);
+        type,
+        votes: 0
+      }])
+      .select()
+      .single();
 
-    document.getElementById("input").value = "";
+    if (error) {
+      console.error(error);
+      return;
+    }
+
+    // 🔥 3. replace temp post with real one
+    postsCache.delete(tempId);
+    postsCache.set(data.id, data);
+
+    render([...postsCache.values()]);
   });
 
+/* -----------------------------
+   VOTING (INSTANT UI UPDATE)
+------------------------------*/
 async function vote(id, amount) {
 
-  const { data } = await supabaseClient
-    .from("posts")
-    .select("votes")
-    .eq("id", id)
-    .single();
+  const post = postsCache.get(id);
+  if (!post) return;
 
-  await supabaseClient
+  // 🔥 INSTANT UI UPDATE (NO LAG)
+  post.votes += amount;
+  postsCache.set(id, post);
+  render([...postsCache.values()]);
+
+  // 🔥 BACKGROUND SYNC
+  const { error } = await supabaseClient
     .from("posts")
-    .update({
-      votes: data.votes + amount
-    })
+    .update({ votes: post.votes })
     .eq("id", id);
+
+  if (error) console.error(error);
 }
 
+/* -----------------------------
+   BAD WORD FILTER
+------------------------------*/
 function badWords(text) {
-
-  const blocked = [
-    "bomb",
-    "kill",
-    "shoot school"
-  ];
+  const blocked = ["bomb", "kill", "shoot school"];
 
   return blocked.some(word =>
     text.toLowerCase().includes(word)
   );
 }
 
+/* -----------------------------
+   REALTIME SYNC (OTHERS ONLY)
+------------------------------*/
 supabaseClient
   .channel("posts-channel")
   .on(
     "postgres_changes",
     {
-      event: "*",   // IMPORTANT (not just INSERT)
+      event: "*",
       schema: "public",
       table: "posts"
     },
     (payload) => {
-      console.log("CHANGE:", payload);
+      console.log("SYNC:", payload);
+
+      // only refresh cache from DB changes
       loadPosts();
     }
   )
   .subscribe();
+
+/* -----------------------------
+   INIT
+------------------------------*/
+loadPosts();
