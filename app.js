@@ -1,9 +1,24 @@
 const feed = document.getElementById("feed");
 
 let postsCache = new Map();
+const voteLock = new Set();
+let renderPending = false;
+let realtimeCooldown = false;
 
 // ------------------------------
-// HOT SCORE ALGORITHM
+// SAFE REQUEST WRAPPER
+// ------------------------------
+async function safeRequest(fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    console.error("Supabase error:", err);
+    return { data: null, error: err };
+  }
+}
+
+// ------------------------------
+// HOT SCORE
 // ------------------------------
 function getHotScore(post) {
   const ageHours =
@@ -17,64 +32,77 @@ function getHotScore(post) {
 }
 
 // ------------------------------
-// GET CURRENT SCHOOL
+// SCHOOL
 // ------------------------------
 function getSchool() {
-  return document.getElementById("school").value;
+  return document.getElementById("school").value.trim();
 }
 
 // ------------------------------
-// LOAD POSTS (FILTERED BY SCHOOL)
+// LOAD POSTS (SCHOOL LOCKED)
 // ------------------------------
 async function loadPosts() {
   const school = getSchool();
 
-  const { data, error } = await supabaseClient
-    .from("posts")
-    .select("*")
-    .eq("school", school);   // 🔥 THIS FIXES CROSS-SCHOOL LEAK
+  const { data, error } = await safeRequest(() =>
+    supabaseClient
+      .from("posts")
+      .select("*")
+      .eq("school", school)
+  );
 
-  if (error) return console.error(error);
+  if (error || !data) return;
 
   postsCache.clear();
-  data.forEach(p => postsCache.set(p.id, p));
+
+  data.forEach(p => {
+    if (p?.id) postsCache.set(p.id, p);
+  });
 
   render();
 }
 
 // ------------------------------
-// RENDER
+// RENDER (STABLE)
 // ------------------------------
 function render() {
-  const posts = [...postsCache.values()];
+  if (renderPending) return;
 
-  posts.sort((a, b) => getHotScore(b) - getHotScore(a));
+  renderPending = true;
 
-  feed.innerHTML = "";
+  requestAnimationFrame(() => {
+    const posts = [...postsCache.values()];
 
-  posts.forEach(post => {
-    const div = document.createElement("div");
-    div.className = "post";
-    div.setAttribute("data-id", post.id);
+    posts.sort((a, b) => getHotScore(b) - getHotScore(a));
 
-    div.innerHTML = `
-      <div class="meta">
-        🏫 ${post.school} • 🔥 ${getHotScore(post).toFixed(2)}
-      </div>
+    feed.innerHTML = "";
 
-      <div>${post.text}</div>
+    posts.forEach(post => {
+      const div = document.createElement("div");
+      div.className = "post";
+      div.setAttribute("data-id", post.id);
 
-      <div class="actions">
-        ⭐ <span class="vote-count">${post.votes}</span>
-        💬 ${post.comments_count || 0}
+      div.innerHTML = `
+        <div class="meta">
+          🏫 ${post.school} • 🔥 ${getHotScore(post).toFixed(2)}
+        </div>
 
-        <button onclick="vote(${post.id}, 1)">▲</button>
-        <button onclick="vote(${post.id}, -1)">▼</button>
-        <button onclick="openComments(${post.id})">💬</button>
-      </div>
-    `;
+        <div>${post.text}</div>
 
-    feed.appendChild(div);
+        <div class="actions">
+          ⭐ <span class="vote-count">${post.votes || 0}</span>
+          💬 ${post.comments_count || 0}
+
+          <button onclick="vote(${post.id}, 1)">▲</button>
+          <button onclick="vote(${post.id}, -1)">▼</button>
+          <button onclick="openComments(${post.id})">💬</button>
+        </div>
+      `;
+
+      feed.appendChild(div);
+    });
+
+    renderPending = false;
   });
 }
 
@@ -106,13 +134,22 @@ document.getElementById("send").addEventListener("click", async () => {
 
   document.getElementById("input").value = "";
 
-  const { data, error } = await supabaseClient
-    .from("posts")
-    .insert([newPost])
-    .select()
-    .single();
+  const { data, error } = await safeRequest(() =>
+    supabaseClient
+      .from("posts")
+      .insert([{
+        text,
+        school,
+        type,
+        votes: 0,
+        comments_count: 0,
+        created_at: new Date().toISOString()
+      }])
+      .select()
+      .single()
+  );
 
-  if (error) return console.error(error);
+  if (error || !data) return;
 
   postsCache.delete(tempId);
   postsCache.set(data.id, data);
@@ -121,21 +158,28 @@ document.getElementById("send").addEventListener("click", async () => {
 });
 
 // ------------------------------
-// VOTING (INSTANT UI)
+// VOTE (ANTI-SPAM + INSTANT)
 // ------------------------------
 async function vote(id, amount) {
+  if (voteLock.has(id)) return;
+  voteLock.add(id);
+
   const post = postsCache.get(id);
   if (!post) return;
 
-  post.votes += amount;
+  post.votes = (post.votes || 0) + amount;
   postsCache.set(id, post);
 
   render();
 
-  await supabaseClient
-    .from("posts")
-    .update({ votes: post.votes })
-    .eq("id", id);
+  await safeRequest(() =>
+    supabaseClient
+      .from("posts")
+      .update({ votes: post.votes })
+      .eq("id", id)
+  );
+
+  voteLock.delete(id);
 }
 
 // ------------------------------
@@ -153,18 +197,22 @@ async function openComments(postId) {
 
   render();
 
-  await supabaseClient.from("comments").insert([
-    {
-      post_id: postId,
-      text: comment,
-      school: post.school   // 🔥 KEEP SCHOOL ISOLATION
-    }
-  ]);
+  await safeRequest(() =>
+    supabaseClient.from("comments").insert([
+      {
+        post_id: postId,
+        text: comment,
+        school: post.school
+      }
+    ])
+  );
 
-  await supabaseClient
-    .from("posts")
-    .update({ comments_count: post.comments_count })
-    .eq("id", postId);
+  await safeRequest(() =>
+    supabaseClient
+      .from("posts")
+      .update({ comments_count: post.comments_count })
+      .eq("id", postId)
+  );
 }
 
 // ------------------------------
@@ -177,26 +225,33 @@ function badWords(text) {
 }
 
 // ------------------------------
-// REALTIME SYNC (SCHOOL-LOCKED)
+// REALTIME (CONTROLLED)
 // ------------------------------
 supabaseClient
   .channel("posts-channel")
   .on(
     "postgres_changes",
     { event: "*", schema: "public", table: "posts" },
-    (payload) => {
-      // reload only current school data
+    () => {
+      if (realtimeCooldown) return;
+
+      realtimeCooldown = true;
       loadPosts();
+
+      setTimeout(() => {
+        realtimeCooldown = false;
+      }, 1000);
     }
   )
   .subscribe();
 
 // ------------------------------
+// INIT
+// ------------------------------
 loadPosts();
 
 // ------------------------------
-// UPDATE FEED WHEN SCHOOL CHANGES
+// SCHOOL SWITCH REFRESH
 // ------------------------------
-document.getElementById("school").addEventListener("change", () => {
-  loadPosts();
-});
+document.getElementById("school")
+  .addEventListener("change", loadPosts);
