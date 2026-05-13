@@ -1,75 +1,110 @@
-let posts = JSON.parse(localStorage.getItem("posts")) || [];
-
 const feed = document.getElementById("feed");
 
-function save() {
-  localStorage.setItem("posts", JSON.stringify(posts));
+async function loadPosts() {
+
+  const { data } = await supabaseClient
+    .from("posts")
+    .select("*")
+    .order("votes", { ascending: false });
+
+  render(data);
 }
 
-function createPost() {
-  const text = document.getElementById("postInput").value;
-  const type = document.getElementById("postType").value;
-  const school = document.getElementById("schoolSelect").value;
+function render(posts) {
 
-  if (!text.trim()) return;
-
-  const post = {
-    id: Date.now(),
-    text,
-    type,
-    school,
-    votes: 0,
-    time: new Date().toLocaleTimeString()
-  };
-
-  posts.unshift(post);
-  save();
-  render();
-
-  document.getElementById("postInput").value = "";
-}
-
-function vote(id, value) {
-  posts = posts.map(p => {
-    if (p.id === id) p.votes += value;
-    return p;
-  });
-
-  save();
-  render();
-}
-
-function render() {
-  const school = document.getElementById("schoolSelect").value;
   feed.innerHTML = "";
 
-  posts
-    .filter(p => p.school === school)
-    .sort((a, b) => b.votes - a.votes)
-    .forEach(post => {
-      const div = document.createElement("div");
-      div.className = "post";
+  posts.forEach(post => {
 
-      div.innerHTML = `
-        <div class="type">#${post.type} • ${post.time}</div>
-        <div>${post.text}</div>
-        <div class="vote">
-          ⭐ ${post.votes}
-          <button onclick="vote(${post.id}, 1)">▲</button>
-          <button onclick="vote(${post.id}, -1)">▼</button>
-        </div>
-      `;
+    const div = document.createElement("div");
+    div.className = "post";
 
-      feed.appendChild(div);
-    });
+    div.innerHTML = `
+      <div class="meta">
+        #${post.type} • ${post.school}
+      </div>
+
+      <div>${post.text}</div>
+
+      <div class="actions">
+        ⭐ ${post.votes}
+
+        <button onclick="vote(${post.id}, 1)">▲</button>
+        <button onclick="vote(${post.id}, -1)">▼</button>
+      </div>
+    `;
+
+    feed.appendChild(div);
+  });
 }
 
-function clearFeed() {
-  posts = [];
-  save();
-  render();
+document.getElementById("send")
+  .addEventListener("click", async () => {
+
+    const text = document.getElementById("input").value;
+    const school = document.getElementById("school").value;
+    const type = document.getElementById("type").value;
+
+    if (!text.trim()) return;
+
+    if (badWords(text)) {
+      alert("Blocked by moderation");
+      return;
+    }
+
+    await supabaseClient
+      .from("posts")
+      .insert([{
+        text,
+        school,
+        type
+      }]);
+
+    document.getElementById("input").value = "";
+  });
+
+async function vote(id, amount) {
+
+  const { data } = await supabaseClient
+    .from("posts")
+    .select("votes")
+    .eq("id", id)
+    .single();
+
+  await supabaseClient
+    .from("posts")
+    .update({
+      votes: data.votes + amount
+    })
+    .eq("id", id);
 }
 
-document.getElementById("schoolSelect").addEventListener("change", render);
+function badWords(text) {
 
-render();
+  const blocked = [
+    "bomb",
+    "kill",
+    "shoot school"
+  ];
+
+  return blocked.some(word =>
+    text.toLowerCase().includes(word)
+  );
+}
+
+supabaseClient
+  .channel("posts-live")
+  .on(
+    "postgres_changes",
+    {
+      event: "*",
+      schema: "public",
+      table: "posts"
+    },
+    () => {
+      loadPosts();
+    }
+  )
+  .subscribe();
+
+loadPosts();
